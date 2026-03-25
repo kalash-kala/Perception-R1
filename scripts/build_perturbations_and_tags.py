@@ -4,16 +4,18 @@ import re
 import json
 import time
 import random
+import argparse
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import pandas as pd
 import numpy as np
 from PIL import Image, ImageFilter, ImageEnhance, ImageDraw
 from google import genai
 from google.genai import types
 
 from dotenv import load_dotenv
-load_dotenv(dotenv_path='/home/kalashkala/Perception-R1/.env')
+load_dotenv(dotenv_path='/home/debarpanb1/kalashkala/Perception-R1/.env')
 
 
 # =========================================================
@@ -22,7 +24,8 @@ load_dotenv(dotenv_path='/home/kalashkala/Perception-R1/.env')
 
 GEMINI_MODEL = "gemini-2.5-flash"
 OUT_DIR = "perturbed_vqa_training"
-OUTPUT_JSON = f"{OUT_DIR}/perturbed_manifest.json"
+DEFAULT_OUTPUT_JSONL = f"{OUT_DIR}/perturbed_manifest.jsonl"
+IMAGE_DIR = "/home/debarpanb1/kalashkala/visual-question-answering/processed_for_verl/images"
 
 
 # =========================================================
@@ -355,7 +358,7 @@ def tag_perturbed_image(
                 ],
                 config=types.GenerateContentConfig(
                     temperature=0.0,
-                    max_output_tokens=256,
+                    max_output_tokens=4096,
                     response_mime_type="application/json",
                 ),
             )
@@ -368,82 +371,136 @@ def tag_perturbed_image(
     raise RuntimeError(f"Failed to tag perturbed image: {last_err}")
 
 
-# =========================================================
-# MAIN
-# =========================================================
-
-def main(input_json: str, output_json: str, out_dir: str, seed: int = 42) -> None:
+def main(args) -> None:
+    seed = args.seed
     random.seed(seed)
     np.random.seed(seed)
 
     client = build_gemini_client()
 
-    with open(input_json, "r") as f:
-        clean_records = json.load(f)
+    print(f"Loading parquet from: {args.input_parquet}")
+    df = pd.read_parquet(args.input_parquet)
+    all_records = df.to_dict('records')
+    total = len(all_records)
 
-    image_out_dir = Path(out_dir) / "images"
+    # ── Row range slicing for resuming ───────────────────────────────────────
+    start = args.start_row if args.start_row is not None else 0
+    end   = args.end_row   if args.end_row   is not None else total
+    start = max(0, min(start, total))
+    end   = max(start, min(end, total))
+    clean_records = all_records[start:end]
+    print(f"Processing rows {start} – {end-1} ({len(clean_records)} rows out of {total} total)", flush=True)
+
+    image_out_dir = Path(IMAGE_DIR)
     image_out_dir.mkdir(parents=True, exist_ok=True)
+    Path(args.output_jsonl).parent.mkdir(parents=True, exist_ok=True)
 
-    manifest = []
+    # Open in append mode for incremental saves
+    with open(args.output_jsonl, "a", encoding="utf-8") as out_f:
+        # Use the FULL dataset size so mild/strong boundary is always consistent
+        half = total // 2
 
-    half = len(clean_records) // 2
+        for local_idx, rec in enumerate(clean_records):
+            idx = start + local_idx  # preserve original global index
+            sample_id = str(idx)
+            
+            question = rec.get("question", "")
+            category = rec.get("category", "object_recognition")
+            
+            answers_array = rec.get("answers", [])
+            answer = ""
+            if len(answers_array) > 0:
+                if isinstance(answers_array, np.ndarray):
+                    answers_array = answers_array.tolist()
+                
+                valid_answers = [a.get('answer', '') for a in answers_array if a.get('answer_confidence') in ['yes', 'maybe']]
+                if valid_answers:
+                    answer = valid_answers[0]
+                else:
+                    answer = answers_array[0].get('answer', '')
 
-    for idx, rec in enumerate(clean_records):
-        sample_id = str(rec["id"])
-        image_path = rec["image_path"]
-        question = rec["question"]
-        answer = rec.get("answer", "")
-        category = rec["category"]
-        visual_cues = rec.get("visual_cues", [])
+            image_info = rec.get("image", {})
+            image_name = image_info.get("path", "")
+            image_path = image_out_dir / image_name
 
-        severity = "mild" if idx < half else "strong"
+            visual_cues = rec.get("visual_cues", [])
 
-        img = load_image(image_path)
-        perturbed_img, perturbation_type = apply_category_perturbation(
-            img=img,
-            category=category,
-            severity=severity,
-        )
+            severity = "mild" if idx < half else "strong"
 
-        out_name = f"{sample_id}_{category}_{severity}_{perturbation_type}.jpg"
-        out_path = image_out_dir / out_name
-        save_image(perturbed_img, str(out_path))
+            img = load_image(str(image_path))
+            perturbed_img, perturbation_type = apply_category_perturbation(
+                img=img,
+                category=category,
+                severity=severity,
+            )
 
-        tag = tag_perturbed_image(
-            client=client,
-            perturbed_img=perturbed_img,
-            question=question,
-            gold_answer=answer,
-            category=category,
-            perturbation_type=perturbation_type,
-            visual_cues=visual_cues,
-        )
+            out_name = f"PERTURBED_{image_name}"
+            out_path = image_out_dir / out_name
+            save_image(perturbed_img, str(out_path))
 
-        record = {
-            "id": f"{sample_id}_{severity}",
-            "source_id": sample_id,
-            "image_path": str(out_path),
-            "question": question,
-            "answer": answer,
-            "category": category,
-            "variant": severity,
-            "perturbation_type": perturbation_type,
-            "visual_cues": visual_cues,
-            "cue_short_reason": rec.get("cue_short_reason", ""),
-            "gemini_tag": tag,
-        }
-        manifest.append(record)
+            tag = tag_perturbed_image(
+                client=client,
+                perturbed_img=perturbed_img,
+                question=question,
+                gold_answer=answer,
+                category=category,
+                perturbation_type=perturbation_type,
+                visual_cues=visual_cues,
+            )
+            
+            record = {
+                "id": f"{sample_id}_{severity}",
+                "source_id": sample_id,
+                "original_image_path": str(image_path),
+                "perturbed_image_path": str(out_path),
+                "question": question,
+                "answer": answer,
+                "category": category,
+                "variant": severity,
+                "perturbation_type": perturbation_type,
+                "visual_cues": visual_cues,
+                "cue_short_reason": rec.get("cue_short_reason", ""),
+                "gemini_tag": tag,
+            }
+            
+            # Write record immediately to file as a JSON line
+            out_f.write(json.dumps(record) + "\n")
+            out_f.flush()
 
-        if (idx + 1) % 25 == 0:
-            print(f"Processed {idx + 1}/{len(clean_records)}")
+            if (local_idx + 1) % 5 == 0 or (local_idx + 1) == len(clean_records):
+                print(f"Processed {local_idx + 1}/{len(clean_records)} (global row {idx})", flush=True)
 
-    Path(output_json).parent.mkdir(parents=True, exist_ok=True)
-    with open(output_json, "w") as f:
-        json.dump(manifest, f, indent=2)
+            if args.sleep_interval > 0:
+                time.sleep(args.sleep_interval)
 
-    print(f"Saved to {output_json}")
+    print(f"Saved to {args.output_jsonl}")
 
 
 if __name__ == "__main__":
-    input_json = "clean_vqa_with_visual_cues.json"
-    main(input_json, OUTPUT_JSON, OUT_DIR)
+    import argparse
+    # Assuming DEFAULT_OUTPUT_JSONL and IMAGE_DIR are defined elsewhere or need to be added.
+    try:
+        DEFAULT_OUTPUT_JSONL
+    except NameError:
+        DEFAULT_OUTPUT_JSONL = "manifest.jsonl" 
+
+    parser = argparse.ArgumentParser(description="Perturb images and tag answerability using Gemini.")
+    parser.add_argument("--input_parquet", type=str, required=True, help="Path to the input parquet file.")
+    parser.add_argument("--output_jsonl", type=str, default=DEFAULT_OUTPUT_JSONL, help="Path to save the manifest JSONL.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument("--sleep_interval", type=float, default=2.0, help="Seconds to sleep between generations (rate limiting).")
+    parser.add_argument("--start_row", type=int, default=None, help="0-based index of the first row to process (inclusive). Omit to start from the beginning.")
+    parser.add_argument("--end_row", type=int, default=None, help="0-based index of the last row to process (exclusive). Omit to process until the end.")
+    
+    args = parser.parse_args()
+    main(args)
+
+# Example Usage with nohup (Run in background):
+# Full run:
+# nohup python scripts/build_perturbations_and_tags.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --output_jsonl perturbed_vqa_training/perturbed_manifest.jsonl --sleep_interval 2.0 > perturbations.log 2>&1 &
+#
+# Resume from row 303 to end:
+# nohup python scripts/build_perturbations_and_tags.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --output_jsonl perturbed_vqa_training/perturbed_manifest.jsonl --start_row 303 --sleep_interval 2.0 > perturbations_resume.log 2>&1 &
+#
+# Process a specific window (e.g. rows 100 to 199 inclusive):
+# nohup python scripts/build_perturbations_and_tags.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --output_jsonl perturbed_vqa_training/perturbed_manifest.jsonl --start_row 100 --end_row 200 --sleep_interval 2.0 > perturbations_partial.log 2>&1 &
