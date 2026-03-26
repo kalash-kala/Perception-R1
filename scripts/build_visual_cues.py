@@ -368,10 +368,10 @@ if __name__ == "__main__":
 
 # Example Usage with nohup (Run in background):
 # Full run:
-# nohup python scripts/build_visual_cues.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/vqa_stratified_700.parquet --output_jsonl /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl > build_visual_cues.log 2>&1 &
+# nohup python scripts/build_visual_cues.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/vqa_stratified_100.parquet --output_jsonl /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl > build_visual_cues.log 2>&1 &
 #
 # Resume from row 303 to end:
-# nohup python scripts/build_visual_cues.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/vqa_stratified_700.parquet --output_jsonl /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --start_row 303 > build_visual_cues_resume.log 2>&1 &
+# nohup python scripts/build_visual_cues.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/vqa_stratified_100.parquet --output_jsonl /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --start_row 303 > build_visual_cues_resume.log 2>&1 &
 #
 # Process a specific window (e.g. rows 100 to 199 inclusive):
-# nohup python scripts/build_visual_cues.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/vqa_stratified_700.parquet --output_jsonl /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --start_row 100 --end_row 200 > build_visual_cues_partial.log 2>&1 &
+# nohup python scripts/build_visual_cues.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/vqa_stratified_100.parquet --output_jsonl /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --start_row 100 --end_row 200 > build_visual_cues_partial.log 2>&1 &

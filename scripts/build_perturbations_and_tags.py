@@ -23,7 +23,7 @@ load_dotenv(dotenv_path='/home/debarpanb1/kalashkala/Perception-R1/.env')
 # =========================================================
 
 GEMINI_MODEL = "gemini-2.5-flash"
-OUT_DIR = "perturbed_vqa_training"
+OUT_DIR = "/home/debarpanb1/kalashkala/visual-question-answering"
 DEFAULT_OUTPUT_JSONL = f"{OUT_DIR}/perturbed_manifest.jsonl"
 IMAGE_DIR = "/home/debarpanb1/kalashkala/visual-question-answering/processed_for_verl/images"
 
@@ -378,8 +378,8 @@ def main(args) -> None:
 
     client = build_gemini_client()
 
-    print(f"Loading parquet from: {args.input_parquet}")
-    df = pd.read_parquet(args.input_parquet)
+    print(f"Loading JSONL from: {args.input_jsonl}")
+    df = pd.read_json(args.input_jsonl, lines=True)
     all_records = df.to_dict('records')
     total = len(all_records)
 
@@ -407,21 +407,28 @@ def main(args) -> None:
             question = rec.get("question", "")
             category = rec.get("category", "object_recognition")
             
-            answers_array = rec.get("answers", [])
-            answer = ""
-            if len(answers_array) > 0:
-                if isinstance(answers_array, np.ndarray):
-                    answers_array = answers_array.tolist()
-                
-                valid_answers = [a.get('answer', '') for a in answers_array if a.get('answer_confidence') in ['yes', 'maybe']]
-                if valid_answers:
-                    answer = valid_answers[0]
-                else:
-                    answer = answers_array[0].get('answer', '')
+            # Try new JSONL fields first, then fallback to old Parquet fields
+            answer = rec.get("answer", "")
+            if not answer:
+                answers_array = rec.get("answers", [])
+                if len(answers_array) > 0:
+                    if isinstance(answers_array, np.ndarray):
+                        answers_array = answers_array.tolist()
+                    
+                    valid_answers = [a.get('answer', '') for a in answers_array if a.get('answer_confidence') in ['yes', 'maybe']]
+                    if valid_answers:
+                        answer = valid_answers[0]
+                    else:
+                        answer = answers_array[0].get('answer', '')
 
-            image_info = rec.get("image", {})
-            image_name = image_info.get("path", "")
-            image_path = image_out_dir / image_name
+            image_path_str = rec.get("image_path", "")
+            if image_path_str:
+                image_path = Path(image_path_str)
+                image_name = image_path.name
+            else:
+                image_info = rec.get("image", {})
+                image_name = image_info.get("path", "")
+                image_path = image_out_dir / image_name
 
             visual_cues = rec.get("visual_cues", [])
 
@@ -485,7 +492,7 @@ if __name__ == "__main__":
         DEFAULT_OUTPUT_JSONL = "manifest.jsonl" 
 
     parser = argparse.ArgumentParser(description="Perturb images and tag answerability using Gemini.")
-    parser.add_argument("--input_parquet", type=str, required=True, help="Path to the input parquet file.")
+    parser.add_argument("--input_jsonl", type=str, required=True, help="Path to the input JSONL file.")
     parser.add_argument("--output_jsonl", type=str, default=DEFAULT_OUTPUT_JSONL, help="Path to save the manifest JSONL.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--sleep_interval", type=float, default=2.0, help="Seconds to sleep between generations (rate limiting).")
@@ -497,10 +504,10 @@ if __name__ == "__main__":
 
 # Example Usage with nohup (Run in background):
 # Full run:
-# nohup python scripts/build_perturbations_and_tags.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --output_jsonl perturbed_vqa_training/perturbed_manifest.jsonl --sleep_interval 2.0 > perturbations.log 2>&1 &
+# nohup python scripts/build_perturbations_and_tags.py --input_jsonl /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --output_jsonl /home/debarpanb1/kalashkala/visual-question-answering/perturbed_manifest.jsonl --sleep_interval 2.0 > perturbations.log 2>&1 &
 #
 # Resume from row 303 to end:
-# nohup python scripts/build_perturbations_and_tags.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --output_jsonl perturbed_vqa_training/perturbed_manifest.jsonl --start_row 303 --sleep_interval 2.0 > perturbations_resume.log 2>&1 &
+# nohup python scripts/build_perturbations_and_tags.py --input_jsonl /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --output_jsonl /home/debarpanb1/kalashkala/visual-question-answering/perturbed_manifest.jsonl --start_row 303 --sleep_interval 2.0 > perturbations_resume.log 2>&1 &
 #
 # Process a specific window (e.g. rows 100 to 199 inclusive):
-# nohup python scripts/build_perturbations_and_tags.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --output_jsonl perturbed_vqa_training/perturbed_manifest.jsonl --start_row 100 --end_row 200 --sleep_interval 2.0 > perturbations_partial.log 2>&1 &
+# nohup python scripts/build_perturbations_and_tags.py --input_jsonl /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --output_jsonl /home/debarpanb1/kalashkala/visual-question-answering/perturbed_manifest.jsonl --start_row 100 --end_row 200 --sleep_interval 2.0 > perturbations_partial.log 2>&1 &
