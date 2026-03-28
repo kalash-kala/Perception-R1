@@ -3,19 +3,15 @@ import io
 import re
 import json
 import time
-import argparse
 from pathlib import Path
 from typing import Dict, List, Optional
-
-import pandas as pd
-import numpy as np
 
 from PIL import Image
 from google import genai
 from google.genai import types
 
 from dotenv import load_dotenv
-load_dotenv(dotenv_path='/home/debarpanb1/kalashkala/Perception-R1/.env')
+load_dotenv(dotenv_path='/home/sriramg/kalashabhayk/Perception-R1/.env')
 
 
 # =========================================================
@@ -23,9 +19,7 @@ load_dotenv(dotenv_path='/home/debarpanb1/kalashkala/Perception-R1/.env')
 # =========================================================
 
 GEMINI_MODEL = "gemini-2.5-flash"
-# Default paths (can be overridden via argparse)
-DEFAULT_OUTPUT_JSONL = "clean_vqa_with_visual_cues.jsonl"
-DEFAULT_IMAGE_DIR = "/home/debarpanb1/kalashkala/visual-question-answering/processed_for_verl/images"
+OUTPUT_JSON = "clean_vqa_with_visual_cues.json"
 
 
 # =========================================================
@@ -204,9 +198,7 @@ Gold answer: {gold_answer}
 """.strip()
 
 
-def extract_json_from_text(text: Optional[str]) -> Dict:
-    if text is None:
-        return {"visual_cues": [], "short_reason": "Gemini response was empty (possibly blocked by safety filters)"}
+def extract_json_from_text(text: str) -> Dict:
     text = text.strip()
     try:
         return json.loads(text)
@@ -222,7 +214,7 @@ def extract_json_from_text(text: Optional[str]) -> Dict:
     if start != -1 and end != -1 and end > start:
         return json.loads(text[start:end + 1])
 
-    raise ValueError(f"Could not parse JSON from Gemini response. Response: {text}")
+    raise ValueError("Could not parse JSON from Gemini response.")
 
 
 def normalize_cue_output(obj: Dict) -> Dict:
@@ -263,7 +255,7 @@ def get_visual_cues(
                 ],
                 config=types.GenerateContentConfig(
                     temperature=0.0,
-                    max_output_tokens=4096,
+                    max_output_tokens=256,
                     response_mime_type="application/json",
                 ),
             )
@@ -280,98 +272,46 @@ def get_visual_cues(
 # MAIN
 # =========================================================
 
-def main(args) -> None:
+def main(input_json: str, output_json: str) -> None:
     client = build_gemini_client()
 
-    print(f"Loading parquet from: {args.input_parquet}")
-    df = pd.read_parquet(args.input_parquet)
-    all_samples = df.to_dict('records')
-    total = len(all_samples)
+    with open(input_json, "r") as f:
+        samples = json.load(f)
 
-    # ── Row range slicing for resuming ───────────────────────────────────────
-    start = args.start_row if args.start_row is not None else 0
-    end   = args.end_row   if args.end_row   is not None else total
-    start = max(0, min(start, total))
-    end   = max(start, min(end, total))
-    samples = all_samples[start:end]
-    print(f"Processing rows {start} – {end-1} ({len(samples)} rows out of {total} total)", flush=True)
+    output = []
+    for idx, sample in enumerate(samples):
+        question = sample["question"]
+        category = assign_category(question)
 
-    Path(args.output_jsonl).parent.mkdir(parents=True, exist_ok=True)
-    
-    # Open in append mode so we can resume or save incrementally
-    with open(args.output_jsonl, "a", encoding="utf-8") as out_f:
-        for local_idx, sample in enumerate(samples):
-            idx = start + local_idx  # preserve original global index
-            question = sample.get("question", "")
-            category = sample.get("category", "")
-            if not category:
-                category = assign_category(question)
+        cues = get_visual_cues(
+            client=client,
+            image_path=sample["image_path"],
+            question=question,
+            gold_answer=sample.get("answer", ""),
+            category=category,
+        )
 
-            answers_array = sample.get("answers", [])
-            answer = ""
-            if len(answers_array) > 0:
-                if isinstance(answers_array, np.ndarray):
-                    answers_array = answers_array.tolist()
-                
-                valid_answers = [a.get('answer', '') for a in answers_array if a.get('answer_confidence') in ['yes', 'maybe']]
-                if valid_answers:
-                    answer = valid_answers[0]
-                else:
-                    answer = answers_array[0].get('answer', '')
+        record = {
+            "id": str(sample["id"]),
+            "image_path": sample["image_path"],
+            "question": question,
+            "answer": sample.get("answer", ""),
+            "category": category,
+            "visual_cues": cues["visual_cues"],
+            "cue_short_reason": cues["short_reason"],
+        }
+        output.append(record)
 
-            image_info = sample.get("image", {})
-            image_name = image_info.get("path", "")
-            image_path = os.path.join(args.image_dir, image_name)
+        if (idx + 1) % 25 == 0:
+            print(f"Processed {idx + 1}/{len(samples)}")
 
-            cues = get_visual_cues(
-                client=client,
-                image_path=image_path,
-                question=question,
-                gold_answer=answer,
-                category=category,
-            )
-            
-            record = {
-                "id": str(idx),
-                "image_path": image_path,
-                "question": question,
-                "answer": answer,
-                "category": category,
-                "visual_cues": cues["visual_cues"],
-                "cue_short_reason": cues["short_reason"],
-            }
-            
-            # Write record immediately to file as a JSON line
-            out_f.write(json.dumps(record) + "\n")
-            out_f.flush()
+    Path(output_json).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_json, "w") as f:
+        json.dump(output, f, indent=2)
 
-            if (local_idx + 1) % 5 == 0 or (local_idx + 1) == len(samples):
-                print(f"Processed {local_idx + 1}/{len(samples)} (global row {idx})", flush=True)
-
-            if args.sleep_interval > 0:
-                time.sleep(args.sleep_interval)
-
-    print(f"Saved to {args.output_jsonl}")
+    print(f"Saved to {output_json}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extract visual cues from VQA samples using Gemini.")
-    parser.add_argument("--input_parquet", type=str, required=True, help="Path to the input parquet file.")
-    parser.add_argument("--output_jsonl", type=str, default=DEFAULT_OUTPUT_JSONL, help="Path to save the output JSONL.")
-    parser.add_argument("--image_dir", type=str, default=DEFAULT_IMAGE_DIR, help="Directory containing the images.")
-    parser.add_argument("--sleep_interval", type=float, default=2.0, help="Seconds to sleep between generations (rate limiting).")
-    parser.add_argument("--start_row", type=int, default=None, help="0-based index of the first row to process (inclusive). Omit to start from the beginning.")
-    parser.add_argument("--end_row", type=int, default=None, help="0-based index of the last row to process (exclusive). Omit to process until the end.")
-    
-    args = parser.parse_args()
-    main(args)
-
-# Example Usage with nohup (Run in background):
-# Full run:
-# nohup python scripts/build_visual_cues.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/vqa_stratified_100.parquet --output_jsonl /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl > build_visual_cues.log 2>&1 &
-#
-# Resume from row 303 to end:
-# nohup python scripts/build_visual_cues.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/vqa_stratified_100.parquet --output_jsonl /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --start_row 303 > build_visual_cues_resume.log 2>&1 &
-#
-# Process a specific window (e.g. rows 100 to 199 inclusive):
-# nohup python scripts/build_visual_cues.py --input_parquet /home/debarpanb1/kalashkala/visual-question-answering/vqa_stratified_100.parquet --output_jsonl /home/debarpanb1/kalashkala/visual-question-answering/clean_vqa_with_visual_cues.jsonl --start_row 100 --end_row 200 > build_visual_cues_partial.log 2>&1 &
+    input_json = "vqa_samples.json"
+    main(input_json, OUTPUT_JSON)

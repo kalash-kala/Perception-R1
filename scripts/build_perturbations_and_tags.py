@@ -415,11 +415,11 @@ def main(args) -> None:
                     if isinstance(answers_array, np.ndarray):
                         answers_array = answers_array.tolist()
                     
-                    valid_answers = [a.get('answer', '') for a in answers_array if a.get('answer_confidence') in ['yes', 'maybe']]
+                    valid_answers = [a.get('answer', '') for a in answers_array if a.get('answer_confidence') in ['yes']]
                     if valid_answers:
-                        answer = valid_answers[0]
+                        answer = valid_answers
                     else:
-                        answer = answers_array[0].get('answer', '')
+                        answer = [a.get('answer', '') for a in answers_array]
 
             image_path_str = rec.get("image_path", "")
             if image_path_str:
