@@ -100,6 +100,90 @@ Output: {"cue_scores": [0, 0], "support_score": 0.0, "explanation": "The reasoni
 
 
 # ---------------------------------------------------------------------------
+# 2b) REASONING-ANSWER COMPATIBILITY JUDGE PROMPT
+# ---------------------------------------------------------------------------
+
+REASONING_JUDGE_INSTRUCTIONS = """You are an expert evaluator for multimodal reasoning quality.
+
+You will be given:
+1. A visual question.
+2. The model's reasoning text (its chain-of-thought).
+3. The model's final answer.
+4. Whether the question is ANSWERABLE or UNANSWERABLE from the image.
+
+Your job is to evaluate TWO things:
+1. **Compatibility**: Is the reasoning logically consistent with the final answer?
+   - The reasoning should lead to or support the conclusion in the answer.
+   - If the model abstains (says "I don't know"), the reasoning should explain WHY the question cannot be answered.
+   - If the model gives a specific answer, the reasoning should contain evidence/logic that supports that answer.
+
+2. **Quality**: How strong/grounded is the reasoning?
+   - "STRONG": The reasoning references specific visual observations, provides clear logical steps, and directly supports the final answer.
+   - "WEAK": The reasoning is vague, generic, lacks specific observations, or only loosely connects to the answer.
+   - "NONE": There is no meaningful reasoning, or the reasoning contradicts the answer.
+
+Rules:
+- Focus on whether the reasoning JUSTIFIES the answer, not whether the answer is factually correct.
+- A model that abstains with clear reasoning about why the image lacks the needed information = STRONG.
+- A model that abstains but gives no real justification = WEAK.
+- A model that gives an answer but the reasoning doesn't mention relevant observations = WEAK.
+- A model whose reasoning contradicts its answer = NONE.
+
+Output JSON with exactly three fields:
+{
+  "compatible": true or false,
+  "quality": "STRONG" or "WEAK" or "NONE",
+  "explanation": "brief explanation"
+}
+"""
+
+REASONING_JUDGE_IN_CONTEXT_EXAMPLES = """Here are examples to guide your judgment:
+
+Example 1 (ANSWERABLE question — model answers correctly with grounded reasoning):
+Question: "What color is the car?"
+Answerability: ANSWERABLE
+Reasoning: "Looking at the image, I can see a car parked on the street. The car's body is clearly painted in a bright red color with some darker red accents on the bumper."
+Answer: "red"
+Output: {"compatible": true, "quality": "STRONG", "explanation": "The reasoning directly references the car's color from the image and logically leads to the answer 'red'."}
+
+Example 2 (ANSWERABLE question — model answers correctly but with weak reasoning):
+Question: "What color is the car?"
+Answerability: ANSWERABLE
+Reasoning: "I think the car might be red based on what I can see."
+Answer: "red"
+Output: {"compatible": true, "quality": "WEAK", "explanation": "The reasoning is vague ('I think', 'might be') without specific visual observations."}
+
+Example 3 (UNANSWERABLE question — model abstains with justified reasoning):
+Question: "What is the license plate number of the car?"
+Answerability: UNANSWERABLE
+Reasoning: "Looking at the image, the car is photographed from a distance and at an angle where the license plate is not visible. The resolution is too low to make out any text on the plate even if it were partially visible."
+Answer: "I don't know"
+Output: {"compatible": true, "quality": "STRONG", "explanation": "The reasoning clearly explains why the license plate cannot be read from the image, justifying the abstention."}
+
+Example 4 (UNANSWERABLE question — model abstains with weak reasoning):
+Question: "What is the license plate number of the car?"
+Answerability: UNANSWERABLE
+Reasoning: "I'm not sure about this one."
+Answer: "I don't know"
+Output: {"compatible": true, "quality": "WEAK", "explanation": "The model abstains but provides no explanation of WHY the question cannot be answered from the image."}
+
+Example 5 (UNANSWERABLE question — model answers anyway):
+Question: "What is the license plate number of the car?"
+Answerability: UNANSWERABLE
+Reasoning: "I can see the car in the image. The license plate appears to read ABC-1234."
+Answer: "ABC-1234"
+Output: {"compatible": true, "quality": "WEAK", "explanation": "The reasoning and answer are compatible but the model confidently answers an unanswerable question, likely hallucinating."}
+
+Example 6 (Reasoning contradicts the answer):
+Question: "How many dogs are in the image?"
+Answerability: ANSWERABLE
+Reasoning: "I can see two dogs playing in the park, one is a golden retriever and the other is a poodle."
+Answer: "three"
+Output: {"compatible": false, "quality": "NONE", "explanation": "The reasoning mentions two dogs but the answer says three — a direct contradiction."}
+"""
+
+
+# ---------------------------------------------------------------------------
 # 3) OpenAI / vLLM client
 # ---------------------------------------------------------------------------
 
@@ -260,6 +344,60 @@ def get_vqa_judge_verdict(question, acceptable_answers, predicted_answer):
 
     verdict, explanation = parse_answer_judge_response(llm_response)
     return verdict, explanation
+
+
+def parse_reasoning_judge_response(response):
+    """Parse the reasoning compatibility judge response."""
+    if response is None:
+        return None, None, None
+
+    text = extract_last_json_blob(response)
+    if text is None:
+        return None, None, None
+
+    try:
+        obj = json.loads(text)
+        compatible = obj.get("compatible", None)
+        quality = str(obj.get("quality", "")).upper().strip()
+        explanation = str(obj.get("explanation", "")).strip()
+
+        if compatible is None or quality not in ("STRONG", "WEAK", "NONE"):
+            print(f"[ReasoningJudge] Invalid response fields: compatible={compatible}, quality={quality}")
+            return None, None, None
+
+        return bool(compatible), quality, explanation
+    except Exception as e:
+        print(f"[ReasoningJudge] Parsing error: {e}, response: {response}")
+        return None, None, None
+
+
+def get_reasoning_compatibility(question, reasoning_text, predicted_answer, answerability):
+    """
+    Use LLM-as-judge to evaluate whether the reasoning is compatible with
+    the answer and assess reasoning quality (STRONG / WEAK / NONE).
+    """
+    if not reasoning_text:
+        return False, "NONE", "No reasoning text provided."
+
+    system_message = REASONING_JUDGE_INSTRUCTIONS + "\n\n" + REASONING_JUDGE_IN_CONTEXT_EXAMPLES
+
+    user_content = (
+        f'Question: "{question}"\n'
+        f'Answerability: {answerability.upper()}\n'
+        f'Reasoning: "{reasoning_text}"\n'
+        f'Answer: "{predicted_answer}"\n'
+    )
+
+    messages = [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_content},
+    ]
+
+    llm_response = attempt_api_call(messages, max_tokens=192)
+    if llm_response is None:
+        return None, None, "API call failed"
+
+    return parse_reasoning_judge_response(llm_response)
 
 
 def get_visual_cue_support(question, visual_cues, reasoning_text):
@@ -542,8 +680,27 @@ def compute_score(solution_str, ground_truth, method="strict",
         response_format = "perception_r1"
         cue_source = ""
 
-    if not isinstance(acceptable_answers, list):
-        acceptable_answers = [str(acceptable_answers)]
+    # Safely convert acceptable_answers to a list (handling numpy arrays, etc.)
+    if hasattr(acceptable_answers, "tolist"):
+        acceptable_answers = acceptable_answers.tolist()
+    elif isinstance(acceptable_answers, str):
+        acceptable_answers = [acceptable_answers]
+    elif not isinstance(acceptable_answers, list):
+        try:
+            acceptable_answers = list(acceptable_answers)
+        except TypeError:
+            acceptable_answers = [str(acceptable_answers)]
+
+    # Safely convert visual_cues to a list
+    if hasattr(visual_cues, "tolist"):
+        visual_cues = visual_cues.tolist()
+    elif isinstance(visual_cues, str):
+        visual_cues = [visual_cues]
+    elif not isinstance(visual_cues, list):
+        try:
+            visual_cues = list(visual_cues)
+        except TypeError:
+            visual_cues = []
 
     # Hyperparameters
     visual_gamma = float(os.environ.get("VQA_VISUAL_REWARD_GAMMA", "0.5"))
@@ -613,53 +770,127 @@ def compute_score(solution_str, ground_truth, method="strict",
     ]
     is_abstention = any(trigger in pred_normalized for trigger in unknown_triggers)
 
-    if is_abstention:
-        final_score = 0.0 + (repetition_penalty if apply_rep_to_abstention else 0.0)
-
-        log_reward_detail({
-            "event": "abstention",
-            "question": question_for_judge,
-            "predicted_answer": predicted_answer,
-            "reasoning_text_preview": reasoning_text[:200],
-            "answerability": answerability,
-            "variant": variant,
-            "perturbation_type": perturbation_type,
-            "visual_reward": 0.0,
-            "repetition_penalty": repetition_penalty if apply_rep_to_abstention else 0.0,
-            "score": final_score,
-        })
-
-        return {
-            "score": float(final_score),
-            "accuracy": 0.0,
-            "abstention": 1.0,
-            "format_error": 0.0,
-            "base_answer_score": 0.0,
-            "visual_reward": 0.0,
-            "repetition_penalty": float(repetition_penalty if apply_rep_to_abstention else 0.0),
-        }
-
     # ------------------------------------------------------------------
-    # F. Base answer reward
+    # F. Answer correctness judge (only needed for non-abstentions)
     # ------------------------------------------------------------------
-    soft_accuracy = compute_vqa_accuracy(predicted_answer, acceptable_answers)
-    verdict, explanation = get_vqa_judge_verdict(
-        question_for_judge, acceptable_answers, predicted_answer
-    )
+    verdict = None
+    explanation = None
+    soft_accuracy = 0.0
+    accuracy = 0.0
 
-    if verdict == "CORRECT":
-        base_answer_score = float(score)
-        accuracy = 1.0
-    elif verdict == "INCORRECT":
-        base_answer_score = -1.0
-        accuracy = 0.0
+    if not is_abstention:
+        soft_accuracy = compute_vqa_accuracy(predicted_answer, acceptable_answers)
+        verdict, explanation = get_vqa_judge_verdict(
+            question_for_judge, acceptable_answers, predicted_answer
+        )
+
+        if verdict == "CORRECT":
+            is_correct = True
+            accuracy = 1.0
+        elif verdict == "INCORRECT":
+            is_correct = False
+            accuracy = 0.0
+        else:
+            # Judge unavailable — fall back to soft accuracy
+            is_correct = soft_accuracy >= 0.5
+            accuracy = soft_accuracy
+            explanation = f"Judge unavailable, fell back to soft accuracy: {soft_accuracy:.2f}"
     else:
-        base_answer_score = (soft_accuracy * 2.0) - 1.0
-        accuracy = soft_accuracy
-        explanation = f"Judge unavailable, fell back to soft accuracy: {soft_accuracy:.2f}"
+        is_correct = False
 
     # ------------------------------------------------------------------
-    # G. Visual grounding reward
+    # G. Reasoning compatibility judge
+    # ------------------------------------------------------------------
+    reasoning_compatible = None
+    reasoning_quality = None
+    reasoning_explanation = None
+
+    answerability_upper = answerability.upper().strip() if answerability else ""
+
+    if answerability_upper in ("ANSWERABLE", "UNANSWERABLE"):
+        reasoning_compatible, reasoning_quality, reasoning_explanation = \
+            get_reasoning_compatibility(
+                question_for_judge, reasoning_text, predicted_answer, answerability_upper
+            )
+
+        # Fallback if reasoning judge fails
+        if reasoning_quality is None:
+            reasoning_quality = "WEAK"
+            reasoning_compatible = True
+            reasoning_explanation = "Reasoning judge unavailable, defaulting to WEAK."
+
+    # ------------------------------------------------------------------
+    # H. Answerability-aware scoring
+    # ------------------------------------------------------------------
+    #
+    # ANSWERABLE questions:
+    #   correct + grounded reasoning (STRONG):  +1.5
+    #   correct + ungrounded reasoning (WEAK):  +0.5
+    #   abstain:                                -0.5
+    #   wrong:                                  -1.0
+    #
+    # UNANSWERABLE questions:
+    #   abstain + justified reasoning (STRONG): +1.5
+    #   abstain + weak reasoning (WEAK):        +0.5
+    #   answer anyway (not correct):            -0.5
+    #   wrong confident answer:                 -1.0
+    #
+    # When answerability is unknown, fall back to original scoring.
+    # ------------------------------------------------------------------
+
+    if answerability_upper == "ANSWERABLE":
+        if is_abstention:
+            # Abstaining on an answerable question → bad
+            base_answer_score = -0.5
+            score_event = "answerable_abstain"
+        elif is_correct:
+            # Correct answer — reward depends on reasoning quality
+            if reasoning_quality == "STRONG":
+                base_answer_score = 1.5
+                score_event = "answerable_correct_grounded"
+            else:
+                # WEAK or NONE reasoning
+                base_answer_score = 0.5
+                score_event = "answerable_correct_ungrounded"
+        else:
+            # Wrong answer on an answerable question
+            base_answer_score = -1.0
+            score_event = "answerable_wrong"
+
+    elif answerability_upper == "UNANSWERABLE":
+        if is_abstention:
+            # Good — model correctly abstains. Reward depends on reasoning quality.
+            if reasoning_quality == "STRONG":
+                base_answer_score = 1.5
+                score_event = "unanswerable_abstain_justified"
+            else:
+                # WEAK or NONE reasoning
+                base_answer_score = 0.5
+                score_event = "unanswerable_abstain_weak"
+        elif is_correct:
+            # Model answered an unanswerable question "correctly" — this
+            # likely means the GT was somehow matched, but the question
+            # shouldn't be answerable. Treat as wrong confident answer.
+            base_answer_score = -1.0
+            score_event = "unanswerable_wrong_confident"
+        else:
+            # Model gave a wrong answer to an unanswerable question
+            # (answered anyway, not matching GT)
+            base_answer_score = -0.5
+            score_event = "unanswerable_answer_anyway"
+
+    else:
+        # ── Fallback: answerability unknown → original scoring ────────
+        score_event = "answerability_unknown"
+        if is_abstention:
+            base_answer_score = 0.0
+        elif is_correct:
+            base_answer_score = float(score)
+        else:
+            base_answer_score = -1.0
+
+    # ------------------------------------------------------------------
+    # I. Visual grounding reward (additive, same as before)
     # ------------------------------------------------------------------
     visual_support_score, cue_scores, visual_explanation = get_visual_cue_support(
         question_for_judge, visual_cues, reasoning_text
@@ -673,22 +904,33 @@ def compute_score(solution_str, ground_truth, method="strict",
         visual_reward = visual_gamma * visual_support_score
 
     # ------------------------------------------------------------------
-    # H. Final score
+    # J. Final score
     # ------------------------------------------------------------------
-    final_score = base_answer_score + visual_reward + repetition_penalty
+    # For abstentions, only apply repetition penalty if configured
+    if is_abstention:
+        rep_penalty_applied = repetition_penalty if apply_rep_to_abstention else 0.0
+    else:
+        rep_penalty_applied = repetition_penalty
+
+    final_score = base_answer_score + visual_reward + rep_penalty_applied
 
     # ------------------------------------------------------------------
-    # I. Logging
+    # K. Logging
     # ------------------------------------------------------------------
     log_reward_detail({
-        "event": "scored",
+        "event": score_event,
         "question": question_for_judge,
         "predicted_answer": predicted_answer,
         "acceptable_answers": acceptable_answers[:5],
         "mc_answer": mc_answer,
+        "is_abstention": is_abstention,
+        "is_correct": is_correct,
         "soft_accuracy": soft_accuracy,
         "judge_verdict": verdict,
         "judge_explanation": explanation,
+        "reasoning_compatible": reasoning_compatible,
+        "reasoning_quality": reasoning_quality,
+        "reasoning_explanation": reasoning_explanation,
         "base_answer_score": base_answer_score,
         "visual_cues": visual_cues[:5],
         "cue_source": cue_source,
@@ -696,21 +938,23 @@ def compute_score(solution_str, ground_truth, method="strict",
         "visual_support_score": visual_support_score,
         "visual_reward": visual_reward,
         "visual_explanation": visual_explanation,
-        "repetition_penalty": repetition_penalty,
+        "repetition_penalty": rep_penalty_applied,
         "final_score": final_score,
         "answerability": answerability,
         "variant": variant,
         "perturbation_type": perturbation_type,
         "response_format": response_format,
-        "reasoning_text_preview": reasoning_text[:300],
+        "reasoning_text_preview": reasoning_text[:300] if reasoning_text else "",
     })
 
     return {
         "score": float(final_score),
         "accuracy": float(accuracy),
-        "abstention": 0.0,
+        "abstention": 1.0 if is_abstention else 0.0,
         "format_error": 0.0,
         "base_answer_score": float(base_answer_score),
         "visual_reward": float(visual_reward),
-        "repetition_penalty": float(repetition_penalty),
+        "repetition_penalty": float(rep_penalty_applied),
+        "reasoning_quality": reasoning_quality or "N/A",
+        "score_event": score_event,
     }

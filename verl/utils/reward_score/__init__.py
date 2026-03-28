@@ -15,14 +15,14 @@
 
 from .math import math_compute_score
 from .r1v import r1v_compute_score
-from .boxed_math_verify import boxed_math_verify_compute_score, perception_boxed_math_verify_compute_score
-from .math_with_visual import boxed_math_verify_with_visual_compute_score
+# from .boxed_math_verify import boxed_math_verify_compute_score, perception_boxed_math_verify_compute_score
+# from .math_with_visual import boxed_math_verify_with_visual_compute_score
 
 
 __all__ = [
     "math_compute_score",
     "r1v_compute_score",
-    "boxed_math_verify_compute_score",
-    "boxed_math_verify_with_visual_compute_score",
-    "perception_boxed_math_verify_compute_score",
+    # "boxed_math_verify_compute_score",
+    # "boxed_math_verify_with_visual_compute_score",
+    # "perception_boxed_math_verify_compute_score",
 ]

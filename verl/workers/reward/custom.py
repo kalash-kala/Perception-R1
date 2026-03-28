@@ -26,12 +26,13 @@ from ...protocol import DataProto
 from ...utils.reward_score import (
     math_compute_score,
     r1v_compute_score,
-    boxed_math_verify_compute_score,
-    perception_boxed_math_verify_compute_score,
 )
-from ...utils.reward_score.math_with_visual import (
-    batch_visual_key_info_reward,
-)
+# from ...utils.reward_score import boxed_math_verify_compute_score, perception_boxed_math_verify_compute_score
+# from ...utils.reward_score.math_with_visual import batch_visual_key_info_reward
+
+boxed_math_verify_compute_score = None
+perception_boxed_math_verify_compute_score = None
+batch_visual_key_info_reward = None
 from .config import RewardConfig
 
 
@@ -53,6 +54,25 @@ class CustomRewardManager:
             self.compute_score: Callable[[str, str], RewardScore] = boxed_math_verify_compute_score
         elif config.score_function == "perception_boxed_math_verify":
             self.compute_score: Callable[[str, str], RewardScore] = perception_boxed_math_verify_compute_score
+        elif config.score_function.endswith(".py"):
+            import importlib.util
+            import sys
+            import os
+            
+            # Resolve absolute path relative to the current working directory
+            # or treat as an absolute path
+            path = os.path.abspath(config.score_function)
+            
+            spec = importlib.util.spec_from_file_location("dynamic_reward_module", path)
+            if spec is None:
+                raise FileNotFoundError(f"Reward script not found: {path} (original: {config.score_function})")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["dynamic_reward_module"] = module
+            spec.loader.exec_module(module)
+            
+            if not hasattr(module, "compute_score"):
+                raise AttributeError(f"The reward script {path} must define a 'compute_score' function.")
+            self.compute_score: Callable[[str, str], RewardScore] = module.compute_score
         else:
             raise NotImplementedError(f"Unknown score function {config.score_function}.")
 
